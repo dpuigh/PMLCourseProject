@@ -1,0 +1,236 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Darren Puigh"
+date: "June 21, 2015"
+output: html_document
+bibliography: bibliography.bib
+---
+
+In the past decade, the number of wearable devices that monitor and record personal activity, e.g. smart phones, *Jawbone Up*, *Nike FuelBand*, *Fitbit*, etc., has increased dramatically. The majority of research using this data has focused on recognizing different activities. The goal for those studies is to see which activity is being performed and when. However, there is now a shifting emphasis for recognizing the quality of the activity. For this, one wants to see how well the activity is being done. 
+
+In this course project, we investigate a data set where participants were asked to perform dumbbell lifts correctly and incorrectly in five different ways [@wle]. Using data from accelerometers on the belt, forearm, arm, and dumbbell of six participants, our goal is to predict how well the activity was performed. The five different classifications of the quality of the activity are:
+
+* A) exactly according to the specification,
+* B) throwing the elbows to the front,
+* C) lifting the dumbbell only halfway,
+* D) lowering the dumbbell only halfway,
+* E) throwing the hips to the front.
+
+```{r, echo=FALSE, eval=FALSE}
+## Run analysis if not done
+#source("Practical_Machine_Learning_Course_Project.R")
+
+## Compile document with
+#rmarkdown::render("Practical_Machine_Learning_Course_Project.Rmd", "html_document")
+```
+
+# Getting and cleaning data
+
+The training and testing data for this analysis can be found online:
+
+```{r, eval=FALSE}
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileURL, "pml-training.csv", method="curl")
+fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileURL, "pml-testing.csv", method="curl")
+```
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>. Note that some of the columns in this data have different sorts of NA characters, namely "NA" and "#DIV/0!". These can be identified when reading in the data:
+
+```{r, eval=FALSE}
+train <- read.csv("pml-training.csv", na.strings=c("NA","#DIV/0!"))
+test <- read.csv("pml-testing.csv", na.strings=c("NA","#DIV/0!"))
+```
+
+Some variables contain many NA values (more than 90% of the rows). We identify and remove those rows, and we remove the first few rows that only contain subject or time data that would not be useful in predicting future outcomes:
+
+```{r, eval=FALSE}
+listColNAs <- sapply(train,function(x) sum(is.na(x))/nrow(train)<0.90)
+
+train <- train[,listColNAs] %>%
+    select(-(X:num_window))
+
+test <- test[,listColNAs] %>%
+    select(-(X:num_window))
+```
+
+We put the test data aside, and we will not come back to it until the end. The *train* data now has 19,622 observations of 53 variables (52 predictors and one outcome variable "classe").
+
+```{r}
+dim(train)
+```
+
+# Variable selection and building the model
+
+In principle, we could train with all 52 predictor variables. However, it is very likely that not all of these variables are useful, and we might be able to create a trained model with less variables that has a similar or better accuracy. To investigate this, we need to split our training set further to only use a portion of it for variable optimization. Note that this is mostly possible due to the large size of the training set (nearly 20,000). Were it much smaller, we might not be able to easily subdivide our training sample many times.
+
+For variable investigations, we will use a random set of 5,000 observations (hereafter called "events"). Furthermore, we use 80% of events for training and 20% for testing:
+
+```{r, eval=FALSE}
+set.seed(1123)
+forVarOpt <- sample(nrow(train), 5000)
+trainVars <- train[forVarOpt,]
+trainNoVars <- train[-forVarOpt,]
+
+inTrainVars <- createDataPartition( y=trainVars$classe, p=0.8, list=FALSE )
+trainingVars <- trainVars[ inTrainVars, ]
+testingVars <- trainVars[ -inTrainVars, ]
+```
+
+With this smaller training set (about 4,000 events), we first train using all variables. We do the training in parallel using a random forest with "method=cv" (for cross validation) and "number=3":
+
+```{r, eval=FALSE}
+tc <- trainControl(method="cv", number=3)
+
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+modFit_Vars_rf <- train( classe ~ ., data=trainingVars, method="rf", trainControl=tc )
+stopCluster(cl)
+```
+
+Next, we can look at the variables and their importance in their training for predicting the outcome:
+
+```{r}
+imp <- varImp(modFit_Vars_rf)$importance
+
+imp$name <- row.names(imp)
+imp <- imp[order(imp$Overall,decreasing=TRUE),]
+print(imp, row.names=FALSE)
+```
+
+From this, we can see that many variables have a very low importance and likely do not contribute much to the accuracy of the model. We use this importance list to remove all variables with importance less than 2.0. Note this chosen value of 2.0 is arbitrary, and it was chosen to see the impact of those variables with high importance compared to models that contain all variables. Next, we create a model removing these unimportant variables:
+
+```{r, eval=FALSE}
+dropVars <- imp[imp$Overall<2.0,]$name
+
+redtrainingVars <- trainingVars[,!(names(trainingVars) %in% dropVars)]
+
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+modFit_redVars_rf <- train( classe ~ ., data=redtrainingVars, method="rf", trainControl=tc )
+stopCluster(cl)
+```
+
+Then, we can compare the two models and test their accuracy on the test set we made especially for this purpose. For the model using all the variables, we find:
+
+```{r}
+cf_all <- confusionMatrix(testingVars$classe,predict(modFit_Vars_rf,testingVars))
+cf_all$overall
+```
+
+Whereas, for the model using the subset of variables, we find:
+```{r}
+cf_red <- confusionMatrix(testingVars$classe,predict(modFit_redVars_rf,testingVars))
+cf_red$overall
+```
+
+We can compare directly the accuracy and kappa values of the model with all variables (labelled "ALL") and the model with a reduced set of variables (labelled "RED"):
+```{r compare-models}
+results <- resamples(list(ALL=modFit_Vars_rf, RED=modFit_redVars_rf))
+summary(results)
+bwplot(results)
+```
+
+In fact, we find that the model with reduced variables has very similar (slightly better) accuracy. Therefore, we will move forward using this reduced model (39 predictor variables and 1 outcome):
+
+```{r}
+training_red <- trainNoVars[,!(names(trainNoVars) %in% dropVars)]
+dim(training_red)
+```
+
+
+# Cross validation
+
+To get a prediction for our expected out of sample error, we use 3-fold cross validation. Note again that the training set has a sufficiently large number of events (14,622) that we could create a large enough testing set to determine the out of sample error. This is done as an example. First, we break the remaining training set into three pieces and train each using a random forest method:
+
+```{r, eval=FALSE}
+folds <- createFolds(y=training_red$classe, k=3, list=TRUE)
+
+train1 <- training_red[-folds[[1]],]; test1  <- training_red[ folds[[1]],]
+
+train2 <- training_red[-folds[[2]],]; test2  <- training_red[ folds[[2]],]
+
+train3 <- training_red[-folds[[3]],]; test3  <- training_red[ folds[[3]],]
+
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+modFit1_rf <- train( classe ~ ., data=train1, method="rf", trainControl=tc)
+modFit2_rf <- train( classe ~ ., data=train2, method="rf", trainControl=tc)
+modFit3_rf <- train( classe ~ ., data=train3, method="rf", trainControl=tc)
+
+stopCluster(cl)
+```
+
+Then, we test each of these models on their respective test sets and get the accuracy:
+
+```{r}
+cf_1 <- confusionMatrix(test1$classe,predict(modFit1_rf,test1))
+cf_2 <- confusionMatrix(test2$classe,predict(modFit2_rf,test2))
+cf_3 <- confusionMatrix(test3$classe,predict(modFit3_rf,test3))
+
+acc <- c(cf_1$overall[1], cf_2$overall[1], cf_2$overall[1])
+acc
+```
+
+The average expected out of sample error (1 - accuracy) is ```r round(mean(1-acc),4)``` with a standard deviation of ```r round(sd(1-acc),4)```.
+
+Alternatively, we can split the remaining training set into a new training set (90%, 13,162 events) and a new testing set (10%, 1460 events):
+
+```{r, eval=FALSE}
+finalTrain <- createDataPartition( y=training_red$classe, p=0.9, list=FALSE )
+final_train <- training_red[ finalTrain, ]
+final_test <- training_red[ -finalTrain, ]
+
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+modFitFinal_rf <- train( classe ~ ., data=final_train, method="rf", trainControl=tc)
+
+stopCluster(cl)
+
+cf_final <- confusionMatrix(final_test$classe,predict(modFitFinal_rf,final_test))
+
+new_acc <- cf_final$overall[1]
+```
+
+Using this method, we would predict an out of sample error of ```r round(mean(1-new_acc), 4)```.
+
+
+
+# The test set
+
+With the test data that we put aside in the beginning, we can predict the class of each of the 20 events:
+
+```{r, eval=FALSE}
+answers <- predict(modFitFinal_rf,test)
+answers <- as.character(answers)
+```
+
+We can store each of the results in individual files using pml_write_files function:
+
+```{r, eval=FALSE}
+pml_write_files = function(x){
+    if( !(file.exists("test_results")) ){
+        dir.create("test_results")
+    }
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("test_results/problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+```
+
+Evaluating the function produces the requested files:
+
+```{r, eval=FALSE}
+source("pml_write_files.R")
+pml_write_files(answers)
+```
+
+
+# References
+
